@@ -1,0 +1,71 @@
+{
+  "prompt_docx": "Prompt_tower_R_Restructured.docx",
+  "qa_docx": "Clinic ai q&a - National.docx",
+  "agent_name": "Tower Radiology at National Harbor",
+  "language": "English",
+  "working_hours": "",
+  "ai_trigger_words": "",
+  "ex": [
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    },
+    {
+      "department": "",
+      "number": "",
+      "message": ""
+    }
+  ],
+  "screens": [
+    {
+      "department": "",
+      "sip_uri": "",
+      "message": "",
+      "data_to_collect": ""
+    },
+    {
+      "department": "",
+      "sip_uri": "",
+      "message": "",
+      "data_to_collect": ""
+    },
+    {
+      "department": "",
+      "sip_uri": "",
+      "message": "",
+      "data_to_collect": ""
+    },
+    {
+      "department": "",
+      "sip_uri": "",
+      "message": "",
+      "data_to_collect": ""
+    }
+  ]
+}

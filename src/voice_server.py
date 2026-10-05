@@ -262,6 +262,21 @@ class Brain:
 
     def _chat_system_prompt(self) -> str:
         # Fast path: role-only. Avoid base.txt JSON/tool formatting overhead.
+        # When the clinic DOCX prompt is present it fully replaces role.txt.
+        try:
+            from .clinic_prompt import get_system_prompt
+
+            clinic = get_system_prompt()
+            if clinic:
+                return clinic.strip()
+        except ImportError:  # pragma: no cover
+            from clinic_prompt import get_system_prompt
+
+            clinic = get_system_prompt()
+            if clinic:
+                return clinic.strip()
+        except Exception:
+            pass
         return (self.role_prompt or "").strip()
 
     def _chat_options(self) -> dict:
@@ -277,13 +292,24 @@ class Brain:
             except Exception:
                 return float(default)
 
+        num_ctx = _get_int("CHAT_NUM_CTX", 1024)
+        try:
+            from .clinic_prompt import clinic_enabled, recommended_num_ctx
+        except ImportError:  # pragma: no cover
+            from clinic_prompt import clinic_enabled, recommended_num_ctx
+        try:
+            if clinic_enabled():
+                num_ctx = recommended_num_ctx(base_default=num_ctx)
+        except Exception:
+            pass
+
         return {
             "temperature": _get_float("CHAT_TEMPERATURE", 0.2),
             "num_predict": _get_int("CHAT_NUM_PREDICT", 80),
-            "num_ctx": _get_int("CHAT_NUM_CTX", 1024),
+            "num_ctx": num_ctx,
         }
 
-    def start_chat_stream(self, user_text: str):
+    def start_chat_stream(self, user_text: str, stop_event=None):
         clean = (user_text or "").strip()
         if not clean:
             return iter(())
@@ -308,6 +334,7 @@ class Brain:
             send_messages,
             options=self._chat_options(),
             keep_alive=self.keep_alive,
+            stop_event=stop_event,
         )
 
     def finish_chat_stream(self, assistant_text: str) -> None:
@@ -427,12 +454,26 @@ class PiperSynth:
         self.length_scale = length_scale
         self.use_cuda = use_cuda
         self.threads = threads
+        from .piper_process import PiperProcess
+        command = [str(self.exe), "--model", str(self.model),
+                   "--noise_scale", str(self.noise_scale), "--length_scale", str(self.length_scale)]
+        if self.config:
+            command += ["--config", str(self.config)]
+        if self.use_cuda:
+            command += ["--cuda"]
+        if self.threads and self.threads > 0:
+            command += ["--threads", str(self.threads)]
+        self._persistent = PiperProcess(command)
 
     def synthesize_wav(self, text: str) -> bytes:
         """Return a WAV byte stream for the given text."""
         txt = (text or "").strip()
         if not txt:
             return b""
+        try:
+            return self._persistent.synthesize(txt)
+        except Exception as exc:
+            print(f"[PIPER] persistent synthesis failed; using one-shot fallback: {exc!r}", flush=True)
 
         fd, wav_path = tempfile.mkstemp(prefix="piper_", suffix=".wav")
         os.close(fd)
@@ -537,31 +578,14 @@ async def _frames_stream(frames: List[rtc.AudioFrame]) -> AsyncIterator[rtc.Audi
 # LiveKit wiring.
 # ---------------------------------------------------------------------------
 def _build_brain() -> Brain:
-    model = os.getenv("OLLAMA_MODEL", "llama3.1:8b")
-    keep_alive = int(os.getenv("OLLAMA_KEEP_ALIVE", "-1"))
-    history_max = int(os.getenv("HISTORY_MAX", "10"))
-    warmup = os.getenv("OLLAMA_WARMUP", "1").lower() not in {"0", "false", "no"}
-    mode = os.getenv("BRAIN_MODE", "chat").strip().lower()
-    if mode not in {"chat", "router"}:
-        mode = "chat"
-    brain = Brain(model=model, keep_alive=keep_alive, history_max=history_max, warmup=warmup, mode=mode)
-
-    # Warm streaming path once so first token latency is lower after cold start.
-    def _warm_stream() -> None:
-        try:
-            for _ in brain.client.chat_stream(
-                brain.model,
-                [{"role": "user", "content": "warm"}],
-                options={"num_predict": 8},
-                keep_alive=brain.keep_alive,
-                read_timeout_s=5,
-            ):
-                break
-        except Exception:
-            pass
-
-    threading.Thread(target=_warm_stream, daemon=True).start()
-    return brain
+    # Models are warmed by setup_fnc. Each call gets its own conversation/client.
+    return Brain(
+        model=os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+        keep_alive=int(os.getenv("OLLAMA_KEEP_ALIVE", "-1")),
+        history_max=int(os.getenv("HISTORY_MAX", "10")),
+        warmup=False,
+        mode=os.getenv("BRAIN_MODE", "chat").strip().lower(),
+    )
 
 
 def _build_tts() -> PiperSynth:
@@ -775,12 +799,12 @@ class LocalWhisperSTT(lk_stt.STT):
             condition_on_previous_text=False,
             initial_prompt=initial_prompt,
         )
+        text_parts = [seg.text.strip() for seg in segments if seg.text]
         stt_ms = (time.monotonic() - stt_t0) * 1000.0
         try:
             print(f"[STT_METRIC] stt_ms={stt_ms:.0f}")
         except Exception:
             pass
-        text_parts = [seg.text.strip() for seg in segments if seg.text]
         full_text = " ".join(text_parts).strip()
 
         return lk_stt.SpeechEvent(
@@ -856,10 +880,13 @@ def _build_stt(ctx: JobContext) -> lk_stt.STT:
 
 
 # Allow slower startup when loading large Whisper models (default is 10s).
-server = AgentServer(initialize_process_timeout=300.0)
+server = AgentServer(initialize_process_timeout=300.0, num_idle_processes=1, port=8081)
+_prewarm_lock = threading.Lock()
+_prewarm_cache = {}
+runtime_ready = threading.Event()
 
 
-def _prewarm(proc: JobProcess) -> None:
+def _load_runtime(proc: JobProcess) -> None:
     # Load heavy models once per worker process to avoid first-turn lag.
     backend = os.getenv("STT_BACKEND", "whisper").lower()
     if backend == "whisper":
@@ -881,6 +908,28 @@ def _prewarm(proc: JobProcess) -> None:
             force_cpu=force_cpu,
             **_silero_opts_from_env(),
         )
+
+
+def _prewarm(proc: JobProcess) -> None:
+    # The thread executor shares these models across calls and the idle worker.
+    # Loading Whisper once prevents GPU exhaustion after repeated reconnects.
+    with _prewarm_lock:
+        if not _prewarm_cache:
+            _load_runtime(proc)
+            proc.userdata["piper_synth"] = _build_tts()
+            if os.getenv("OLLAMA_WARMUP", "1").lower() not in {"0", "false", "no"}:
+                from .clinic_prompt import get_system_prompt, recommended_num_ctx
+                OllamaClient().chat(
+                    os.getenv("OLLAMA_MODEL", "llama3.1:8b"),
+                    [{"role": "system", "content": get_system_prompt()},
+                     {"role": "user", "content": "Hello"}],
+                    options={"num_predict": 1, "num_ctx": recommended_num_ctx(base_default=int(os.getenv("CHAT_NUM_CTX", "2048")))},
+                    keep_alive=-1,
+                )
+            _prewarm_cache.update(proc.userdata)
+            print("[VOICE_SERVER] runtime ready (Whisper, Silero, Ollama, Piper)", flush=True)
+        proc.userdata.update(_prewarm_cache)
+        runtime_ready.set()
 
 
 server.setup_fnc = _prewarm
@@ -909,10 +958,12 @@ async def voice_session(ctx: JobContext) -> None:
         # We manage interruptions explicitly in this file; auto-resume can create
         # confusing "skip" behavior after interruptions.
         resume_false_interruption=False,
+        min_endpointing_delay=0.0,
+        max_endpointing_delay=0.5,
     )
 
     brain = _build_brain()
-    tts = _build_tts()
+    tts = ctx.proc.userdata.get("piper_synth") or await asyncio.to_thread(_build_tts)
     current_turn: Optional[asyncio.Task] = None
     turn_seq = 0
     active_turn_id = 0
@@ -950,7 +1001,7 @@ async def voice_session(ctx: JobContext) -> None:
         clean = " ".join((text or "").split())
         if not clean:
             return
-        print(f"[{tag}] {clean}")
+        print(f"[{tag}] {clean}", flush=True)
 
     try:
         fragment_merge_sec = float(os.getenv("USER_FRAGMENT_MERGE_SEC", "1.2"))
@@ -1003,7 +1054,8 @@ async def voice_session(ctx: JobContext) -> None:
         """Remove basic markdown markers so TTS doesn't speak symbols."""
         if not text:
             return ""
-        clean = re.sub(r"[*`_]+", "", text)  # bold/italic/code markers
+        clean = re.sub(r"\[(?:warmly|calmly|politely|empathetically|professionally|gently|cheerfully)\]", "", text, flags=re.I)
+        clean = re.sub(r"[*`_]+", "", clean)  # bold/italic/code markers
         # Remove leading list markers like "1.", "1)", "-", "*" (but do not break decimals like "3.14").
         clean = re.sub(r"^[\s]*(?:[-*•]|[0-9]{1,3}[.)])(?:\s+|$)", "", clean)
         clean = re.sub(r"\s+", " ", clean).strip()
@@ -1025,8 +1077,10 @@ async def voice_session(ctx: JobContext) -> None:
         await handle
 
     async def _run_turn(state: TurnState) -> None:
-        cancel_event = asyncio.Event()
+        cancel_event = threading.Event()
+        speaker_task = None
         text = state.user_text
+        await ctx.room.local_participant.set_attributes({"voice.state": "thinking"})
         turn_t0 = time.monotonic()
         llm_t0: Optional[float] = None
         llm_t1: Optional[float] = None
@@ -1085,6 +1139,7 @@ async def voice_session(ctx: JobContext) -> None:
                     if frames and _is_active():
                         if tts_t0 is None:
                             tts_t0 = time.monotonic()
+                        await ctx.room.local_participant.set_attributes({"voice.state": "speaking"})
                         state.assistant_spoken = (state.assistant_spoken + " " + cur_text).strip()
                         play_handle = session.say(
                             text=cur_text,
@@ -1122,7 +1177,7 @@ async def voice_session(ctx: JobContext) -> None:
                 token_q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
                 sentence_q: "asyncio.Queue[Optional[str]]" = asyncio.Queue()
 
-                token_iter = brain.start_chat_stream(text)
+                token_iter = brain.start_chat_stream(text, stop_event=cancel_event)
                 llm_t0 = time.monotonic()
 
                 def _llm_worker() -> None:
@@ -1131,6 +1186,8 @@ async def voice_session(ctx: JobContext) -> None:
                             if not _is_active():
                                 break
                             loop.call_soon_threadsafe(token_q.put_nowait, tok)
+                    except Exception as exc:
+                        loop.call_soon_threadsafe(token_q.put_nowait, exc)
                     finally:
                         loop.call_soon_threadsafe(token_q.put_nowait, None)
 
@@ -1144,6 +1201,8 @@ async def voice_session(ctx: JobContext) -> None:
                     tok = await token_q.get()
                     if tok is None or not _is_active():
                         break
+                    if isinstance(tok, Exception):
+                        raise tok
                     if first_tok_ms is None and llm_t0 is not None:
                         first_tok_ms = (time.monotonic() - llm_t0) * 1000
                         try:
@@ -1237,108 +1296,131 @@ async def voice_session(ctx: JobContext) -> None:
             except Exception:
                 pass
         except asyncio.CancelledError:
-            cancel_event.set()
-            # unblock queues quickly
-            try:
-                token_q.put_nowait(None)  # type: ignore[name-defined]
-            except Exception:
-                pass
-            try:
-                sentence_q.put_nowait(None)  # type: ignore[name-defined]
-            except Exception:
-                pass
             raise
+        except Exception as exc:
+            if call_closed or (isinstance(exc, RuntimeError) and "AgentSession is closing" in str(exc)):
+                return
+            _log("TURN_ERR", repr(exc))
+            if _is_active():
+                await _send_chat("assistant", "Sorry, the reply failed. Please try speaking again.")
+        finally:
+            cancel_event.set()
+            if speaker_task is not None:
+                speaker_task.cancel()
+                await asyncio.gather(speaker_task, return_exceptions=True)
+            if state.turn_id == active_turn_id:
+                await ctx.room.local_participant.set_attributes({"voice.state": "listening"})
+
+    transcript_lock = asyncio.Lock()
+    barge_task = None
+    pending_user_text = ""
+    call_closed = False
+
+    async def _cancel_turn() -> None:
+        nonlocal current_turn, active_turn_id
+        active_turn_id += 1
+        brain.client.cancel_active_stream()
+        try:
+            session.interrupt()
+        except RuntimeError:
+            pass  # Room disconnect may already have closed AgentSession.
+        task = current_turn
+        if task and not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            if active_state and active_state.assistant_spoken:
+                brain.append_assistant_partial(active_state.assistant_spoken)
+        current_turn = None
 
     async def _handle_transcript(evt) -> None:
-        nonlocal current_turn, turn_seq, active_turn_id, active_state
-        # evt has: text, is_final
-        is_final = bool(getattr(evt, "is_final", False))
-
-        text = getattr(evt, "text", None) or getattr(evt, "transcript", None)
-        if not text:
+        nonlocal turn_seq, active_turn_id, active_state, pending_user_text
+        if call_closed:
             return
-        text = str(text).strip()
-        if not text:
+        # Interim hypotheses must not create duplicate turns or spoken replies.
+        if not bool(getattr(evt, "is_final", False)):
             return
-
-        now = time.monotonic()
-        prev_state = active_state
-        is_interrupt = bool(current_turn and not current_turn.done())
-        # "Barge" is *only* when the agent is actively speaking audio.
-        is_speaking = False
-        try:
-            is_speaking = session.agent_state == "speaking"
-        except Exception:
-            is_speaking = False
-        is_barge = is_interrupt and is_speaking
-
-        # Kick off LLM early on partials if nothing is running.
-        if not is_final and preemptive_stt:
-            if not current_turn or current_turn.done():
-                _log("USER_PARTIAL", text)
-                turn_seq += 1
-                active_turn_id = turn_seq
-                active_state = TurnState(turn_id=active_turn_id, user_text=text, last_user_ts=now)
-                new_task = asyncio.create_task(_run_turn(active_state))
-                _set_current_turn(new_task)
-            else:
-                if active_state:
-                    active_state.user_text = text
+        text = (getattr(evt, "text", None) or getattr(evt, "transcript", "") or "").strip()
+        if not text and not pending_user_text:
             return
-
-        # Each new transcript starts a new turn id; older turns should self-stop.
-        turn_seq += 1
-        active_turn_id = turn_seq
-
-        # Cancel and interrupt any ongoing turn/speech/LLM stream.
-        if is_interrupt:
-            # Stop speech immediately if the agent was speaking.
-            try:
-                speech = session.current_speech
-                if speech is not None and hasattr(speech, "interrupt") and not speech.done():
-                    speech.interrupt(force=True)
-            except Exception:
-                pass
-            try:
-                brain.client.cancel_active_stream()
-            except Exception:
-                pass
-
-            _log("BARGE" if is_barge else "USER", text)
-            if is_barge and prev_state is not None:
-                spoken_dbg = (prev_state.assistant_spoken or "").strip()
-                if spoken_dbg:
-                    _log("MODEL_BEFORE_BARGE", spoken_dbg)
-
-            if prev_state is not None:
-                spoken = (prev_state.assistant_spoken or "").strip()
-                if spoken:
-                    brain.append_assistant_partial(spoken)
-                else:
-                    # Merge quick follow-up fragments like "No. Can we talk about" + "Mars?"
-                    if fragment_merge_sec and (now - float(prev_state.last_user_ts)) <= float(fragment_merge_sec):
-                        text = f"{prev_state.user_text.rstrip()} {text}".strip()
-                    brain.pop_last_user_if_matches(prev_state.user_text)
-
-            if current_turn and not current_turn.done():
-                current_turn.cancel()
-        else:
+        async with transcript_lock:
+            text = " ".join(part for part in (pending_user_text, text) if part).strip()
+            pending_user_text = ""
+            # Whisper may finish an earlier phrase while the caller is still talking.
+            if session.user_state == "speaking":
+                pending_user_text = text
+                return
+            now = time.monotonic()
+            previous = active_state
+            await _cancel_turn()
+            if (previous and not previous.assistant_spoken
+                    and now - previous.last_user_ts <= fragment_merge_sec):
+                brain.pop_last_user_if_matches(previous.user_text)
+                text = f"{previous.user_text} {text}".strip()
+            turn_seq = max(turn_seq, active_turn_id) + 1
+            active_turn_id = turn_seq
+            active_state = TurnState(turn_id=turn_seq, user_text=text, last_user_ts=now)
             _log("USER", text)
-            asyncio.create_task(_send_chat("user", text))
+            await _send_chat("user", text)
+            _set_current_turn(asyncio.create_task(_run_turn(active_state)))
 
-        active_state = TurnState(turn_id=active_turn_id, user_text=text, last_user_ts=now)
-        new_task = asyncio.create_task(_run_turn(active_state))
-        _set_current_turn(new_task)
+    async def _on_speech_started() -> None:
+        await asyncio.sleep(barge_min_sec)
+        if session.user_state == "speaking":
+            async with transcript_lock:
+                if current_turn and not current_turn.done():
+                    _log("BARGE", "user started speaking; cancelling old response")
+                    await _cancel_turn()
+                await ctx.room.local_participant.set_attributes({"voice.state": "listening"})
+
+    @session.on("user_state_changed")
+    def _on_user_state(evt) -> None:
+        nonlocal barge_task
+        if evt.new_state == "speaking":
+            if barge_task:
+                barge_task.cancel()
+            barge_task = asyncio.create_task(_on_speech_started())
+
+    pending_transcripts = set()
 
     @session.on("user_input_transcribed")
     def _on_transcript(evt) -> None:
-        # Event emitter expects sync callbacks; dispatch async work as a task.
-        asyncio.create_task(_handle_transcript(evt))
+        task = asyncio.create_task(_handle_transcript(evt))
+        pending_transcripts.add(task)
+        task.add_done_callback(pending_transcripts.discard)
 
-    agent = Agent(instructions="You are a transport-only agent. Core reasoning is handled externally.")
-    room_opts = room_io.RoomOptions(close_on_disconnect=False)
-    await session.start(agent=agent, room=ctx.room, room_options=room_opts)
+    async def _close_processing() -> None:
+        nonlocal call_closed
+        call_closed = True
+        if barge_task:
+            barge_task.cancel()
+        for task in pending_transcripts:
+            task.cancel()
+        await asyncio.gather(*pending_transcripts, return_exceptions=True)
+        await _cancel_turn()
+
+    @ctx.room.on("participant_disconnected")
+    def _on_participant_left(participant) -> None:
+        if participant.kind != rtc.ParticipantKind.PARTICIPANT_KIND_AGENT:
+            asyncio.create_task(_close_processing())
+
+    @session.on("close")
+    def _on_close(_evt) -> None:
+        asyncio.create_task(_close_processing())
+
+    async def _shutdown() -> None:
+        await _close_processing()
+        await session.aclose()
+
+    ctx.add_shutdown_callback(_shutdown)
+    agent = Agent(instructions="You are a transport-only agent.")
+    opts = room_io.RoomOptions(close_on_disconnect=True)
+    await session.start(agent=agent, room=ctx.room, room_options=opts)
     await ctx.connect()
+    await ctx.room.local_participant.set_attributes({"voice.state": "listening"})
+    greeting = os.getenv("VOICE_GREETING", "Hello, I'm ready. How can I help you?").strip()
+    if greeting:
+        await _send_chat("assistant", greeting)
+        await _say_chunk(greeting)
 
 
 def main() -> None:

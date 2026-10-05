@@ -1,8 +1,13 @@
 'use client';
 
-import { type HTMLAttributes, useCallback, useState } from 'react';
+import { type HTMLAttributes, useCallback, useMemo, useState } from 'react';
 import { Track } from 'livekit-client';
-import { useChat, useRemoteParticipants, useVoiceAssistant, BarVisualizer } from '@livekit/components-react';
+import {
+  BarVisualizer,
+  useChat,
+  useRemoteParticipants,
+  useVoiceAssistant,
+} from '@livekit/components-react';
 import { ChatTextIcon, PhoneDisconnectIcon } from '@phosphor-icons/react/dist/ssr';
 import { TrackToggle } from '@/components/livekit/agent-control-bar/track-toggle';
 import { Button } from '@/components/livekit/button';
@@ -29,7 +34,13 @@ export interface AgentControlBarProps extends UseInputControlsProps {
 }
 
 /**
- * A control bar specifically designed for voice assistant interfaces
+ * A control bar specifically designed for voice assistant interfaces.
+ *
+ * This version intentionally shows connection diagnostics because the most common
+ * voice bugs are not LLM bugs. Usually one of these is false:
+ * 1. browser connected to LiveKit
+ * 2. local microphone track is published
+ * 3. backend agent joined the same room
  */
 export function AgentControlBar({
   controls,
@@ -77,7 +88,17 @@ export function AgentControlBar({
     chat: controls?.chat ?? publishPermissions.data,
   };
 
-  const isAgentAvailable = participants.some((p) => p.isAgent);
+  const agentParticipant = useMemo(() => {
+    return participants.find((participant) => participant.isAgent);
+  }, [participants]);
+
+  const isAgentAvailable = Boolean(agentParticipant);
+
+  const micStatus = microphoneToggle.pending
+    ? 'pending'
+    : microphoneToggle.enabled
+      ? 'mic on'
+      : 'mic off';
 
   return (
     <div
@@ -89,8 +110,51 @@ export function AgentControlBar({
       {...props}
     >
       {/* Chat input hidden for voice-first UI */}
+      {visibleControls.chat && chatOpen && (
+        <ChatInput
+          chatOpen={chatOpen}
+          isAgentAvailable={isAgentAvailable}
+          onSend={handleSendMessage}
+        />
+      )}
 
-      <div className="flex gap-1 items-center">
+      <div className="text-muted-foreground mb-2 flex flex-wrap items-center gap-2 px-1 text-[11px]">
+        <span
+          className={cn(
+            'rounded-full border px-2 py-0.5',
+            isConnected
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+              : 'border-destructive/30 bg-destructive/10 text-destructive'
+          )}
+        >
+          Room: {isConnected ? 'connected' : 'disconnected'}
+        </span>
+        <span
+          className={cn(
+            'rounded-full border px-2 py-0.5',
+            microphoneToggle.enabled
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+              : 'border-destructive/30 bg-destructive/10 text-destructive'
+          )}
+        >
+          Mic: {micStatus}
+        </span>
+        <span
+          className={cn(
+            'rounded-full border px-2 py-0.5',
+            isAgentAvailable
+              ? 'border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300'
+              : 'border-destructive/30 bg-destructive/10 text-destructive'
+          )}
+        >
+          Agent: {agentParticipant?.identity || 'waiting'}
+        </span>
+        <span className="border-input/50 bg-muted/40 rounded-full border px-2 py-0.5">
+          State: {agentState}
+        </span>
+      </div>
+
+      <div className="flex items-center gap-1">
         <div className="flex gap-1">
           {/* Toggle Microphone */}
           {visibleControls.microphone && (
@@ -135,7 +199,7 @@ export function AgentControlBar({
             />
           )}
 
-          {/* Transcript toggle hidden in voice-only mode */}
+          {/* Transcript toggle hidden in voice-only mode unless controls.chat=true */}
           {visibleControls.chat && (
             <Toggle
               size="icon"

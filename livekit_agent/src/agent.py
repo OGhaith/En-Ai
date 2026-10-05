@@ -1,3 +1,4 @@
+import os
 import sys
 from pathlib import Path
 
@@ -12,7 +13,7 @@ if str(ROOT) not in sys.path:
 # Load LiveKit/Ollama/Piper env vars from project root.
 load_dotenv(ROOT / ".env.local")
 
-from src.voice_server import server  # noqa: E402
+from src.voice_server import server, runtime_ready  # noqa: E402
 
 
 if __name__ == "__main__":
@@ -28,10 +29,18 @@ if __name__ == "__main__":
                 self.send_response(404)
                 self.end_headers()
                 return
-            self.send_response(200)
+            ready = runtime_ready.is_set()
+            if ready:
+                try:
+                    from urllib.request import urlopen
+                    with urlopen("http://127.0.0.1:8081/", timeout=1) as response:
+                        ready = response.status == 200
+                except Exception:
+                    ready = False
+            self.send_response(200 if ready else 503)
             self.send_header("Content-Type", "text/plain")
             self.end_headers()
-            self.wfile.write(b"ok")
+            self.wfile.write(b"ready" if ready else b"loading or disconnected")
 
         def log_message(self, format: str, *args) -> None:
             return  # silence default logging
@@ -55,8 +64,8 @@ if __name__ == "__main__":
     try:
         health_port = int(os.getenv("AGENT_HEALTH_PORT", "9090"))
         _start_health_server(health_port)
-    except Exception:
-        pass
+    except Exception as exc:
+        print(f"[AGENT] health setup failed: {exc!r}", flush=True)
 
     backoff = 0
     crash_flag = Path(__file__).resolve().parents[2] / "data" / "crash_flag.txt"

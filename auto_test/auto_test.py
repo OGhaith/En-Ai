@@ -99,6 +99,15 @@ class Brain:
             self.messages = self.messages[-max_hist:]
 
     def _chat_system_prompt(self) -> str:
+        # When the clinic DOCX prompt is present it fully replaces role.txt.
+        try:
+            from src.clinic_prompt import get_system_prompt
+
+            clinic = get_system_prompt()
+            if clinic:
+                return clinic.strip()
+        except Exception:
+            pass
         return (self.role_prompt or "").strip()
 
     def _chat_options(self) -> dict:
@@ -114,10 +123,19 @@ class Brain:
             except Exception:
                 return float(default)
 
+        num_ctx = _get_int("CHAT_NUM_CTX", 1024)
+        try:
+            from src.clinic_prompt import clinic_enabled, recommended_num_ctx
+
+            if clinic_enabled():
+                num_ctx = recommended_num_ctx(base_default=num_ctx)
+        except Exception:
+            pass
+
         return {
             "temperature": _get_float("CHAT_TEMPERATURE", 0.2),
             "num_predict": _get_int("CHAT_NUM_PREDICT", 80),
-            "num_ctx": _get_int("CHAT_NUM_CTX", 1024),
+            "num_ctx": num_ctx,
         }
 
     def chat(self, user_text: str) -> str:

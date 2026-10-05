@@ -1,0 +1,380 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <title>Local Voice AI</title>
+  <style>
+    :root {
+      color-scheme: dark;
+      font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      --panel: rgba(18, 25, 39, .78);
+      --panel-border: rgba(153, 173, 218, .16);
+      --muted: #aeb8cd;
+      --text: #f7f7f8;
+      --accent: #7c8cff;
+      --green: #22c55e;
+      --red: #f43f5e;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100svh;
+      color: var(--text);
+      background: radial-gradient(circle at 50% 10%, rgba(67, 91, 145, .58) 0, rgba(17, 24, 39, .86) 33%, #080b12 72%);
+    }
+    main {
+      width: min(760px, 100%);
+      min-height: 100svh;
+      margin: 0 auto;
+      display: flex;
+      flex-direction: column;
+      gap: 22px;
+      padding: max(24px, env(safe-area-inset-top)) 20px max(28px, env(safe-area-inset-bottom));
+    }
+    header { text-align: center; }
+    h1 { margin: 0; font-size: 21px; font-weight: 680; letter-spacing: -.025em; }
+    #status { margin-top: 7px; color: var(--muted); font-size: 14px; min-height: 20px; }
+    .voice-panel {
+      padding: 18px;
+      border: 1px solid var(--panel-border);
+      border-radius: 20px;
+      background: var(--panel);
+      box-shadow: 0 18px 50px rgba(0, 0, 0, .2);
+      backdrop-filter: blur(16px);
+    }
+    .voice-heading { display: flex; align-items: center; justify-content: space-between; gap: 14px; margin-bottom: 12px; }
+    .voice-heading label { font-size: 15px; font-weight: 720; }
+    .voice-heading span { color: var(--muted); font-size: 12px; }
+    select {
+      width: 100%;
+      appearance: none;
+      color: var(--text);
+      background: #111827 url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='16' height='16' fill='none' stroke='%23aeb8cd' stroke-width='2'%3E%3Cpath d='m3 6 5 5 5-5'/%3E%3C/svg%3E") no-repeat right 15px center;
+      border: 1px solid rgba(159, 177, 218, .22);
+      border-radius: 13px;
+      padding: 13px 42px 13px 14px;
+      font: inherit;
+      font-weight: 650;
+      outline: none;
+    }
+    select:focus { border-color: var(--accent); box-shadow: 0 0 0 3px rgba(124, 140, 255, .15); }
+    select:disabled { opacity: .58; cursor: not-allowed; }
+    .voice-summary { display: flex; flex-wrap: wrap; gap: 8px; margin: 13px 0 10px; }
+    .chip {
+      padding: 5px 9px;
+      color: #dbe4ff;
+      background: rgba(124, 140, 255, .12);
+      border: 1px solid rgba(124, 140, 255, .2);
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 620;
+    }
+    .chip.recommended { color: #bbf7d0; background: rgba(34, 197, 94, .12); border-color: rgba(34, 197, 94, .22); }
+    #voiceDescription { margin: 0 0 14px; color: #c5cee0; font-size: 13px; line-height: 1.5; }
+    .voice-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 9px; }
+    .metric { min-width: 0; padding: 10px 11px; border-radius: 12px; background: rgba(255, 255, 255, .045); }
+    .metric-label { display: block; color: #8995ad; font-size: 10px; text-transform: uppercase; letter-spacing: .055em; }
+    .metric-value { display: block; margin-top: 4px; color: #f1f5ff; font-size: 13px; font-weight: 670; overflow-wrap: anywhere; }
+    .benchmark-note { margin: 11px 0 0; color: #7f8aa1; font-size: 11px; line-height: 1.45; }
+    .stage { flex: 1; min-height: 245px; display: grid; place-items: center; align-content: center; gap: 21px; }
+    .orb {
+      position: relative;
+      width: min(43vw, 190px);
+      aspect-ratio: 1;
+      border-radius: 50%;
+      background: radial-gradient(circle at 34% 30%, #a8d8ff 0, #648cf4 24%, #7755d9 54%, #25234d 100%);
+      box-shadow: 0 0 70px rgba(101, 130, 246, .35);
+      transition: transform .25s ease, filter .25s ease, box-shadow .25s ease;
+    }
+    .orb::after { content: ''; position: absolute; inset: 9%; border-radius: inherit; border: 1px solid rgba(255, 255, 255, .22); }
+    .orb.listening { animation: breathe 2.2s ease-in-out infinite; }
+    .orb.thinking { animation: spinGlow 1.5s linear infinite; filter: hue-rotate(28deg); }
+    .orb.speaking { animation: speak .72s ease-in-out infinite alternate; box-shadow: 0 0 95px rgba(123, 214, 255, .62); }
+    @keyframes breathe { 50% { transform: scale(1.045); box-shadow: 0 0 92px rgba(101, 130, 246, .55); } }
+    @keyframes spinGlow { 50% { transform: rotate(180deg) scale(.96); } 100% { transform: rotate(360deg); } }
+    @keyframes speak { to { transform: scale(1.075); filter: saturate(1.28) brightness(1.12); } }
+    .words { width: min(680px, 92vw); min-height: 72px; text-align: center; }
+    #heard { color: #b6c0d4; font-size: 14px; margin-bottom: 9px; }
+    #reply { font-size: clamp(16px, 3.4vw, 21px); line-height: 1.5; text-wrap: balance; }
+    footer { display: flex; justify-content: center; align-items: center; gap: 16px; }
+    button { border: 0; cursor: pointer; font: inherit; color: white; }
+    #call { min-width: 170px; padding: 14px 24px; border-radius: 999px; background: var(--red); font-weight: 720; box-shadow: 0 10px 34px rgba(244, 63, 94, .28); }
+    #call.start { background: var(--green); box-shadow: 0 10px 34px rgba(34, 197, 94, .25); }
+    #call:disabled { opacity: .58; cursor: wait; }
+    #mute { width: 52px; height: 52px; border-radius: 50%; background: rgba(255, 255, 255, .12); display: none; }
+    #mute.on { background: rgba(244, 63, 94, .35); }
+    #error { min-height: 20px; text-align: center; color: #fda4af; font-size: 13px; }
+    @media (max-width: 560px) {
+      main { gap: 16px; padding-inline: 14px; }
+      .voice-panel { padding: 15px; border-radius: 17px; }
+      .voice-grid { grid-template-columns: repeat(2, 1fr); }
+      .stage { min-height: 220px; }
+      .orb { width: min(46vw, 175px); }
+    }
+  </style>
+</head>
+<body>
+  <main>
+    <header><h1>Local Voice AI</h1><div id="status">Choose a TTS voice to begin</div></header>
+
+    <section class="voice-panel" aria-labelledby="voiceLabel">
+      <div class="voice-heading"><label id="voiceLabel" for="voiceSelect">TTS voice</label><span>Choose before starting the call</span></div>
+      <select id="voiceSelect" disabled aria-describedby="voiceDescription"></select>
+      <div id="voiceSummary" class="voice-summary"></div>
+      <p id="voiceDescription"></p>
+      <div class="voice-grid">
+        <div class="metric"><span class="metric-label">Model load</span><span id="modelLoad" class="metric-value">—</span></div>
+        <div class="metric"><span class="metric-label">Generation</span><span id="generation" class="metric-value">—</span></div>
+        <div class="metric"><span class="metric-label">Speed</span><span id="speed" class="metric-value">—</span></div>
+        <div class="metric"><span class="metric-label">Model size</span><span id="modelSize" class="metric-value">—</span></div>
+        <div class="metric"><span class="metric-label">Sample rate</span><span id="sampleRate" class="metric-value">—</span></div>
+        <div class="metric"><span class="metric-label">Runtime</span><span class="metric-value">CPU / Piper</span></div>
+      </div>
+      <p class="benchmark-note">Measurements are from this computer. The selected model loads once while the call connects.</p>
+    </section>
+
+    <section class="stage">
+      <div id="orb" class="orb"></div>
+      <div class="words"><div id="heard"></div><div id="reply"></div></div>
+    </section>
+    <footer><button id="mute" aria-label="Mute">Mute</button><button id="call" class="start" disabled>Start call</button></footer>
+    <div id="error" role="alert"></div>
+  </main>
+
+  <script>
+    (() => {
+      const fallbackVoices = [
+        { id: 'danny-low', name: 'Danny Low', accent: 'American English', gender: 'Male', quality: 'Low', model_size_mb: 60.2, load_seconds: .30, generation_seconds: .24, sample_audio_seconds: 10.74, realtime_multiple: 45.0, sample_rate_hz: 16000, description: 'Current voice. Fastest and lightest option.' },
+        { id: 'lessac-high', name: 'Lessac High', accent: 'American English', gender: 'Female', quality: 'High', model_size_mb: 108.6, load_seconds: .42, generation_seconds: 1.17, sample_audio_seconds: 9.66, realtime_multiple: 8.3, sample_rate_hz: 22050, description: 'Clear, natural American voice. Recommended for the clinic agent.' },
+        { id: 'ryan-high', name: 'Ryan High', accent: 'American English', gender: 'Male', quality: 'High', model_size_mb: 115.2, load_seconds: .40, generation_seconds: 1.16, sample_audio_seconds: 9.86, realtime_multiple: 8.5, sample_rate_hz: 22050, description: 'Detailed American male voice with high-quality pronunciation.' },
+        { id: 'jenny-dioco-medium', name: 'Jenny Dioco Medium', accent: 'British English', gender: 'Female', quality: 'Medium', model_size_mb: 60.3, load_seconds: .27, generation_seconds: .32, sample_audio_seconds: 10.65, realtime_multiple: 33.2, sample_rate_hz: 22050, description: 'Calm British female voice with an excellent speed-to-quality balance.' },
+        { id: 'northern-english-male-medium', name: 'Northern English Male Medium', accent: 'Northern British English', gender: 'Male', quality: 'Medium', model_size_mb: 60.3, load_seconds: .28, generation_seconds: .28, sample_audio_seconds: 9.66, realtime_multiple: 35.1, sample_rate_hz: 22050, description: 'Fast Northern English male voice with low memory use.' }
+      ];
+
+      const call = document.getElementById('call');
+      const mute = document.getElementById('mute');
+      const orb = document.getElementById('orb');
+      const status = document.getElementById('status');
+      const heard = document.getElementById('heard');
+      const reply = document.getElementById('reply');
+      const error = document.getElementById('error');
+      const voiceSelect = document.getElementById('voiceSelect');
+      const voiceSummary = document.getElementById('voiceSummary');
+      const voiceDescription = document.getElementById('voiceDescription');
+      const modelLoad = document.getElementById('modelLoad');
+      const generation = document.getElementById('generation');
+      const speed = document.getElementById('speed');
+      const modelSize = document.getElementById('modelSize');
+      const sampleRate = document.getElementById('sampleRate');
+
+      let voices = fallbackVoices;
+      let ws, ctx, source, processor, stream, audio;
+      let active = false, muted = false, acceptingSpeech = false, playing = false, connecting = false;
+      const selectedVoice = () => voices.find(voice => voice.id === voiceSelect.value) || voices[0];
+      const setState = (name, label) => { orb.className = 'orb ' + (name || ''); status.textContent = label; };
+
+      function renderVoiceDetails(actualLoadSeconds) {
+        const voice = selectedVoice();
+        if (!voice) return;
+        voiceSummary.innerHTML = '';
+        [voice.accent, voice.gender, voice.quality + ' quality'].forEach(text => {
+          const chip = document.createElement('span');
+          chip.className = 'chip';
+          chip.textContent = text;
+          voiceSummary.appendChild(chip);
+        });
+        if (voice.id === 'lessac-high') {
+          const chip = document.createElement('span');
+          chip.className = 'chip recommended';
+          chip.textContent = 'Recommended';
+          voiceSummary.appendChild(chip);
+        }
+        voiceDescription.textContent = voice.description;
+        modelLoad.textContent = actualLoadSeconds == null ? `~${voice.load_seconds.toFixed(2)} seconds` : `${Number(actualLoadSeconds).toFixed(2)} seconds actual`;
+        generation.textContent = `${voice.generation_seconds.toFixed(2)}s for ${voice.sample_audio_seconds.toFixed(1)}s audio`;
+        speed.textContent = `${voice.realtime_multiple.toFixed(1)}× real time`;
+        modelSize.textContent = `${voice.model_size_mb.toFixed(1)} MB`;
+        sampleRate.textContent = `${(voice.sample_rate_hz / 1000).toFixed(voice.sample_rate_hz % 1000 ? 2 : 0)} kHz`;
+      }
+
+      function renderVoiceOptions(defaultId = 'danny-low') {
+        const saved = localStorage.getItem('ttsVoice');
+        const selected = voices.some(voice => voice.id === saved) ? saved : voices.some(voice => voice.id === defaultId) ? defaultId : voices[0]?.id;
+        voiceSelect.innerHTML = '';
+        voices.forEach(voice => {
+          const option = document.createElement('option');
+          option.value = voice.id;
+          option.textContent = `${voice.name} — ${voice.accent} — ${voice.quality}`;
+          voiceSelect.appendChild(option);
+        });
+        voiceSelect.value = selected || '';
+        voiceSelect.disabled = !voices.length;
+        call.disabled = !voices.length;
+        renderVoiceDetails();
+        setState('', 'Ready to call');
+      }
+
+      async function loadVoiceCatalog() {
+        try {
+          const response = await fetch('/tts_voices.json', { cache: 'no-store' });
+          if (!response.ok) throw new Error('catalog unavailable');
+          const data = await response.json();
+          if (Array.isArray(data.voices) && data.voices.length) voices = data.voices;
+          renderVoiceOptions(data.default_voice_id);
+        } catch (_) {
+          renderVoiceOptions('danny-low');
+        }
+      }
+
+      voiceSelect.addEventListener('change', () => {
+        localStorage.setItem('ttsVoice', voiceSelect.value);
+        renderVoiceDetails();
+      });
+
+      async function setupAudio() {
+        stream = await navigator.mediaDevices.getUserMedia({ audio: { echoCancellation: true, noiseSuppression: true, autoGainControl: true } });
+        ctx = new AudioContext({ sampleRate: 16000 });
+        await ctx.resume();
+        source = ctx.createMediaStreamSource(stream);
+        processor = ctx.createScriptProcessor(2048, 1, 1);
+        processor.onaudioprocess = event => {
+          if (!active || muted || !acceptingSpeech || !ws || ws.readyState !== WebSocket.OPEN) return;
+          const input = event.inputBuffer.getChannelData(0);
+          const pcm = new Int16Array(input.length);
+          for (let i = 0; i < input.length; i++) {
+            const sample = Math.max(-1, Math.min(1, input[i]));
+            pcm[i] = sample < 0 ? sample * 32768 : sample * 32767;
+          }
+          ws.send(pcm.buffer);
+        };
+        source.connect(processor);
+        processor.connect(ctx.destination);
+      }
+
+      function connectSocket(voiceId) {
+        return new Promise((resolve, reject) => {
+          let settled = false;
+          const finish = (callback, value) => {
+            if (settled) return;
+            settled = true;
+            clearTimeout(timeout);
+            callback(value);
+          };
+          const timeout = setTimeout(() => finish(reject, new Error('The selected TTS model took too long to load')), 15000);
+          ws = new WebSocket('wss://' + location.host);
+          ws.binaryType = 'arraybuffer';
+          ws.onopen = () => {
+            const voice = selectedVoice();
+            setState('thinking', `Loading ${voice.name}…`);
+            ws.send(JSON.stringify({ type: 'set_voice', voice_id: voiceId }));
+          };
+          ws.onerror = () => finish(reject, new Error('Voice server is unavailable'));
+          ws.onclose = () => {
+            if (!settled) finish(reject, new Error('Connection ended while loading the TTS voice'));
+            if (active) stopCall('Connection ended');
+          };
+          ws.onmessage = async event => {
+            if (typeof event.data === 'string') {
+              let message;
+              try { message = JSON.parse(event.data); } catch (_) { return; }
+              if (message.type === 'voice_loading') {
+                setState('thinking', message.text || 'Loading TTS voice…');
+              } else if (message.type === 'voice_ready') {
+                renderVoiceDetails(message.actual_load_seconds);
+                finish(resolve);
+              } else if (message.type === 'voice_error') {
+                finish(reject, new Error(message.text || 'Could not load the selected TTS voice'));
+              } else if (message.type === 'voice_catalog' && Array.isArray(message.voices)) {
+                voices = message.voices;
+              } else if (message.type === 'status' && message.text === 'listening_to_reply') {
+                acceptingSpeech = false;
+                setState('thinking', 'Thinking…');
+              } else if (message.type === 'status' && active && !playing) {
+                acceptingSpeech = true;
+                setState('listening', muted ? 'Muted' : 'Listening…');
+              } else if (message.type === 'transcript') {
+                heard.textContent = message.text ? 'You: ' + message.text : '';
+              } else if (message.type === 'reply') {
+                reply.textContent = message.text || '';
+              }
+              return;
+            }
+            playing = true;
+            acceptingSpeech = false;
+            setState('speaking', 'Speaking…');
+            const url = URL.createObjectURL(new Blob([event.data], { type: 'audio/wav' }));
+            audio = new Audio(url);
+            audio.onended = () => {
+              URL.revokeObjectURL(url);
+              playing = false;
+              acceptingSpeech = active && !muted;
+              if (active) setState('listening', muted ? 'Muted' : 'Listening…');
+            };
+            try { await audio.play(); } catch (playError) { error.textContent = playError?.message || 'Audio playback failed'; }
+          };
+        });
+      }
+
+      async function startCall() {
+        error.textContent = '';
+        connecting = true;
+        call.disabled = true;
+        voiceSelect.disabled = true;
+        setState('thinking', 'Connecting…');
+        try {
+          const voiceId = selectedVoice().id;
+          localStorage.setItem('ttsVoice', voiceId);
+          await Promise.all([setupAudio(), connectSocket(voiceId)]);
+          active = true;
+          acceptingSpeech = true;
+          call.disabled = false;
+          call.classList.remove('start');
+          call.textContent = 'End call';
+          mute.style.display = 'block';
+          setState('listening', 'Listening…');
+        } catch (err) {
+          error.textContent = err?.message || 'Could not start call';
+          stopCall('Ready to call');
+        } finally {
+          connecting = false;
+        }
+      }
+
+      function stopCall(label = 'Call ended') {
+        active = false;
+        acceptingSpeech = false;
+        playing = false;
+        try { ws?.close(); } catch (_) {}
+        try { processor?.disconnect(); source?.disconnect(); } catch (_) {}
+        stream?.getTracks().forEach(track => track.stop());
+        try { ctx?.close(); } catch (_) {}
+        try { audio?.pause(); } catch (_) {}
+        ws = ctx = source = processor = stream = audio = null;
+        call.disabled = false;
+        call.classList.add('start');
+        call.textContent = 'Start call';
+        voiceSelect.disabled = false;
+        mute.style.display = 'none';
+        mute.classList.remove('on');
+        mute.textContent = 'Mute';
+        muted = false;
+        setState('', label);
+      }
+
+      call.addEventListener('click', () => {
+        if (connecting) return;
+        if (active) stopCall('Call ended');
+        else startCall();
+      });
+      mute.addEventListener('click', () => {
+        muted = !muted;
+        mute.classList.toggle('on', muted);
+        mute.textContent = muted ? 'Unmute' : 'Mute';
+        if (active && !playing) setState(muted ? '' : 'listening', muted ? 'Muted' : 'Listening…');
+      });
+      loadVoiceCatalog();
+    })();
+  </script>
+</body>
+</html>

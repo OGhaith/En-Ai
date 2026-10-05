@@ -63,7 +63,7 @@ export default async function RootLayout({ children }: RootLayoutProps) {
         <title>{pageTitle}</title>
         <meta name="description" content={pageDescription} />
       </head>
-      <body className="overflow-x-hidden">
+      <body suppressHydrationWarning className="overflow-x-hidden">
         <ThemeProvider
           attribute="class"
           defaultTheme="system"

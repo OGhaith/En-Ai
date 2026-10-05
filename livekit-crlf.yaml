@@ -1,0 +1,50 @@
+# LiveKit server configuration.
+#
+# Why this file exists
+# --------------------
+# The browser (192.168.195.56) and this host (192.168.197.45) sit on separate
+# networks joined by an OpenVPN tunnel that carries TCP but drops UDP.
+# Direct ICE is therefore impossible: every candidate pair ends in
+# requestsSent=8 / responsesReceived=0 and the session dies about 15s in with
+# Leave{CONNECTION_TIMEOUT}. Chrome cannot help either, because it does not
+# implement RFC 6544 TCP candidates, so rtc.tcp_port (7881) is never nominated.
+#
+# The fix is LiveKit's built-in TURN server reached over TLS/TCP, since TCP is
+# the only protocol that survives that network. The relay runs on this same
+# host and hands media to the SFU over the local interface, so the TURN hop and
+# all media stay on the local networks.
+#
+# Why tls_port must be 443
+# ------------------------
+# LiveKit 1.9.11 hardcodes the TURN/TLS ICE URL as
+#     turns:%s:443?transport=tcp
+# in the binary, so the advertised port ignores tls_port. Verified: there are
+# zero occurrences of "turns:%s:%d". A TURN server on any other port is
+# therefore unreachable by browsers, and this is what forces port 443.
+# Tailscale already listens on 443, but only on its own addresses
+# (100.89.142.88 and fd7a:115c:a1e0::1401:8ee5), so binding 0.0.0.0:443 here
+# coexists with it and leaves 192.168.197.45:443 free for TURN.
+#
+# No firewall change is needed for this: the existing "livekit-server.exe"
+# inbound allow rules cover Protocol TCP and UDP with LocalPort Any.
+#
+# Field names verified against the shipped binary's struct tags. Note they are
+# relay_range_start / relay_range_end, not relay_port_range_*.
+
+turn:
+  enabled: true
+  # Must match the certificate CN/SAN in certs/livekit.pem, otherwise the
+  # browser rejects the TLS handshake on turns:.
+  domain: 192.168.197.45
+  cert_file: ./certs/livekit.pem
+  key_file: ./certs/livekit-key.pem
+  # Hardcoded to 443 on the client side regardless; see above.
+  tls_port: 443
+  # The default range is 30000-30002, which is only three allocations and will
+  # fail under concurrent calls. rtc ICE media uses UDP 7882, so this range
+  # does not collide.
+  relay_range_start: 30000
+  relay_range_end: 30100
+  # udp_port is deliberately left unset. UDP is exactly what the OpenVPN path
+  # drops, so advertising turn:/stun: would only add candidates that can never
+  # be nominated, and would make browsers prefer a relay that cannot work.

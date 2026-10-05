@@ -3,9 +3,5 @@ interface LayoutProps {
 }
 
 export default async function Layout({ children }: LayoutProps) {
-  return (
-    <>
-      {children}
-    </>
-  );
+  return <>{children}</>;
 }

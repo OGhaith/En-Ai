@@ -1,4 +1,8 @@
-﻿aiofiles==24.1.0
+# Complete Python environment for local-voice-ai (Windows, Python 3.12).
+# PyTorch CUDA 12.1 wheels use the official PyTorch package index.
+--extra-index-url https://download.pytorch.org/whl/cu121
+
+aiofiles==24.1.0
 aiohappyeyeballs==2.6.1
 aiohttp==3.13.3
 aioice==0.10.2
@@ -122,6 +126,7 @@ rpds-py==0.30.0
 safetensors==0.7.0
 scipy==1.15.3
 segments==2.3.0
+setuptools==78.1.0
 shellingham==1.5.4
 six==1.17.0
 sniffio==1.3.1

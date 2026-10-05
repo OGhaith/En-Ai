@@ -52,8 +52,8 @@ export const ChatEntry = ({
         className={cn(
           'max-w-[90%] rounded-[20px] px-3 py-2 text-base leading-6',
           messageOrigin === 'local'
-            ? 'bg-muted/70 ml-auto text-foreground'
-            : 'bg-muted/30 mr-auto text-foreground'
+            ? 'bg-muted/70 text-foreground ml-auto'
+            : 'bg-muted/30 text-foreground mr-auto'
         )}
       >
         {message}

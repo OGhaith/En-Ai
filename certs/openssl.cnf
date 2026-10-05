@@ -1,0 +1,18 @@
+[ req ]
+distinguished_name = dn
+x509_extensions = v3
+prompt = no
+
+[ dn ]
+CN = 192.168.197.45
+
+[ v3 ]
+subjectAltName = @alt
+basicConstraints = CA:FALSE
+keyUsage = digitalSignature, keyEncipherment
+extendedKeyUsage = serverAuth
+
+[ alt ]
+IP.1 = 192.168.197.45
+IP.2 = 127.0.0.1
+DNS.1 = localhost
