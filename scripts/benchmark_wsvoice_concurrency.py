@@ -102,9 +102,11 @@ async def run_client(
     end_at = transcript_at = reply_at = audio_at = None
     audio = b""
     try:
-        context = ssl.create_default_context()
-        context.check_hostname = False
-        context.verify_mode = ssl.CERT_NONE
+        context = None
+        if uri.startswith("wss://"):
+            context = ssl.create_default_context()
+            context.check_hostname = False
+            context.verify_mode = ssl.CERT_NONE
         async with websockets.connect(
             uri,
             ssl=context,

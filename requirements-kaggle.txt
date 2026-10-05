@@ -1,0 +1,11 @@
+# Kaggle/Linux benchmark runtime (Python 3.13, T4 GPU).
+# CTranslate2 4.6.0 is required because newer 4.6.x wheels require a
+# CUDA runtime newer than the driver currently exposed by Kaggle.
+av==16.1.0
+ctranslate2==4.6.0
+faster-whisper==1.2.1
+huggingface-hub==0.36.2
+numpy==2.2.6
+python-dotenv==1.2.1
+requests==2.32.3
+websockets==16.0
