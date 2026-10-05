@@ -21,6 +21,7 @@ import asyncio
 import io
 import json
 import os
+import sys
 import threading
 import time
 import wave
@@ -187,16 +188,46 @@ def new_voice_process(voice_id: str) -> PiperProcess:
         # --threads CLI flag. Child processes inherit this setting.
         os.environ["OMP_NUM_THREADS"] = str(threads)
 
-    command = [
-        env_str("PIPER_EXE", str(ROOT / "bin" / "piper.exe")),
+    if os.getenv("PIPER_PYTHON_WORKER", "0").lower() in {"1", "true", "yes"}:
+        command = [sys.executable, str(ROOT / "scripts" / "piper_cuda_worker.py")]
+    else:
+        command = [env_str("PIPER_EXE", str(ROOT / "bin" / "piper.exe"))]
+
+    command.extend([
         "--model", str(model),
         "--config", str(config),
         "--noise_scale", str(env_float("PIPER_NOISE_SCALE", 0.7)),
         "--length_scale", str(env_float("PIPER_LENGTH_SCALE", 1.0)),
-    ]
+    ])
     if os.getenv("PIPER_USE_CUDA", "0").lower() in {"1", "true", "yes"}:
         command.append("--cuda")
     return PiperProcess(command)
+
+
+_SHARED_PIPER_LOCK = threading.Lock()
+_SHARED_PIPER_PROCESSES: Dict[str, PiperProcess] = {}
+
+
+def shared_piper_enabled() -> bool:
+    return os.getenv("PIPER_SHARED", "0").lower() in {"1", "true", "yes"}
+
+
+def load_voice_process(voice_id: str) -> tuple[PiperProcess, bool]:
+    """Load and warm a voice, sharing one persistent worker when requested."""
+    if not shared_piper_enabled():
+        process = new_voice_process(voice_id)
+        process.synthesize("Voice system ready.")
+        return process, False
+
+    with _SHARED_PIPER_LOCK:
+        process = _SHARED_PIPER_PROCESSES.get(voice_id)
+        if process is not None:
+            return process, True
+
+        process = new_voice_process(voice_id)
+        process.synthesize("Voice system ready.")
+        _SHARED_PIPER_PROCESSES[voice_id] = process
+        return process, False
 
 
 # ---------------------------------------------------------------------------
@@ -585,7 +616,7 @@ class VoiceConnection:
 
     def close(self) -> None:
         process, self.tts = self.tts, None
-        if process is not None:
+        if process is not None and not shared_piper_enabled():
             process.close()
 
     async def select_voice(self, voice_id: str) -> None:
@@ -620,22 +651,19 @@ class VoiceConnection:
         started = time.perf_counter()
         process: Optional[PiperProcess] = None
         try:
-            process = new_voice_process(voice_id)
-            # Start Piper and load the selected model now, before the call begins.
-            # The returned warmup audio is intentionally discarded.
-            await asyncio.to_thread(process.synthesize, "Voice system ready.")
+            process, cached = await asyncio.to_thread(load_voice_process, voice_id)
             actual_load = time.perf_counter() - started
 
             previous, self.tts = self.tts, process
             self.voice_id = voice_id
-            if previous is not None:
+            if previous is not None and previous is not process and not shared_piper_enabled():
                 previous.close()
 
             await self.send_json({
                 "type": "voice_ready",
                 "voice": {key: value for key, value in spec.items() if key != "model"},
                 "actual_load_seconds": round(actual_load, 3),
-                "cached": False,
+                "cached": cached,
             })
             print(
                 f"[WSVOICE] selected voice={voice_id} load_ms={actual_load * 1000:.0f}",
@@ -692,7 +720,7 @@ class VoiceConnection:
             await self.send_json({"type": "reply", "text": answer})
 
             if self.tts is None:
-                self.tts = new_voice_process(self.voice_id)
+                self.tts, _ = await asyncio.to_thread(load_voice_process, self.voice_id)
             wav = await asyncio.to_thread(_synthesize_wav, answer, self.tts)
             if wav:
                 await self.send_wav(wav)

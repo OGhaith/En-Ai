@@ -22,6 +22,8 @@ OLLAMA_LOG="${WORK_ROOT}/ollama.log"
 LEVELS="${LEVELS:-1 10 20 30 40}"
 CLINIC_NUM_CTX="${CLINIC_NUM_CTX:-49152}"
 PIPER_THREADS="${PIPER_THREADS:-1}"
+OLLAMA_GPU="${OLLAMA_GPU:-0}"
+VOICE_GPU="${VOICE_GPU:-1}"
 COOLDOWN_SECONDS="${COOLDOWN_SECONDS:-20}"
 BENCHMARK_TIMEOUT="${BENCHMARK_TIMEOUT:-600}"
 
@@ -32,6 +34,27 @@ echo "[1/10] Installing Linux/Python dependencies"
 apt-get update -qq
 DEBIAN_FRONTEND=noninteractive apt-get install -y -qq zstd curl wget ca-certificates
 python -m pip install -q --no-cache-dir -r requirements-kaggle.txt
+
+# The release Piper binary is CPU-only. Install the same Piper inference code
+# with ONNX Runtime CUDA so TTS can run on the voice GPU.
+python -m pip uninstall -y -q onnxruntime onnxruntime-gpu >/dev/null 2>&1 || true
+python -m pip install -q --no-cache-dir onnxruntime-gpu==1.23.2 pathvalidate==3.3.1
+python -m pip install -q --no-cache-dir --no-deps piper-tts==1.8.0
+python - <<'PY'
+import onnxruntime as ort
+
+providers = ort.get_available_providers()
+print("ONNX Runtime providers:", providers)
+if "CUDAExecutionProvider" not in providers:
+    raise SystemExit("onnxruntime-gpu installed but CUDAExecutionProvider is unavailable")
+PY
+
+GPU_COUNT="$(nvidia-smi -L 2>/dev/null | wc -l | tr -d ' ')"
+if [[ "${GPU_COUNT}" -lt 2 ]]; then
+    OLLAMA_GPU=0
+    VOICE_GPU=0
+fi
+echo "GPU layout: Ollama=cuda:${OLLAMA_GPU}, Whisper/Piper=cuda:${VOICE_GPU} (detected ${GPU_COUNT})"
 
 echo "[2/10] Installing Linux Piper"
 if [[ ! -x "${PIPER_DIR}/piper" ]]; then
@@ -70,9 +93,14 @@ echo "[5/10] Installing and starting Ollama"
 if ! command -v ollama >/dev/null 2>&1; then
   curl -fsSL https://ollama.com/install.sh | sh
 fi
-if ! curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1; then
-  nohup env OLLAMA_HOST=127.0.0.1:11434 ollama serve >"${OLLAMA_LOG}" 2>&1 &
-fi
+# Restart Ollama so CUDA_VISIBLE_DEVICES is guaranteed to place Gemma on the
+# requested card instead of inheriting an older notebook process.
+pkill -TERM -x ollama >/dev/null 2>&1 || true
+sleep 2
+nohup env \
+    CUDA_VISIBLE_DEVICES="${OLLAMA_GPU}" \
+    OLLAMA_HOST=127.0.0.1:11434 \
+    ollama serve >"${OLLAMA_LOG}" 2>&1 &
 for _ in $(seq 1 120); do
   curl -sf http://127.0.0.1:11434/api/tags >/dev/null 2>&1 && break
   sleep 1
@@ -134,9 +162,11 @@ fi
 
 # Kaggle has weak CPU capacity. One OpenMP thread per Piper process prevents
 # 10-40 simultaneous callers from multiplying CPU worker threads.
-PRESERVED_LD_LIBRARY_PATH="${PIPER_DIR}:${LD_LIBRARY_PATH:-}"
+PYTHON_LD_LIBRARY_PATH="${LD_LIBRARY_PATH:-}"
+PIPER_LD_LIBRARY_PATH="${PIPER_DIR}:${LD_LIBRARY_PATH:-}"
 nohup env \
-  LD_LIBRARY_PATH="${PRESERVED_LD_LIBRARY_PATH}" \
+    CUDA_VISIBLE_DEVICES="${VOICE_GPU}" \
+    LD_LIBRARY_PATH="${PYTHON_LD_LIBRARY_PATH}" \
   OMP_NUM_THREADS="${PIPER_THREADS}" \
   OMP_DYNAMIC=FALSE \
   OMP_WAIT_POLICY=PASSIVE \
@@ -152,7 +182,10 @@ nohup env \
   WHISPER_DEVICE=cuda \
   WHISPER_COMPUTE_TYPE=float16 \
   WSVOICE_WHISPER_MODEL="${WHISPER_DIR}" \
-  PIPER_EXE="${PIPER_DIR}/piper" \
+    PIPER_EXE="${PIPER_DIR}/piper" \
+    PIPER_PYTHON_WORKER=1 \
+    PIPER_USE_CUDA=1 \
+    PIPER_SHARED=1 \
   PIPER_MODEL="${PIPER_MODEL_DIR}/en_US-danny-low.onnx" \
   PIPER_CONFIG="${PIPER_MODEL_DIR}/en_US-danny-low.onnx.json" \
   PIPER_THREADS="${PIPER_THREADS}" \
@@ -174,7 +207,7 @@ curl -sf http://127.0.0.1:7444/ >/dev/null
 echo "Voice server PID=$(cat "${WSVOICE_PID_FILE}")"
 
 echo "[8/10] Creating the benchmark WAV"
-export LD_LIBRARY_PATH="${PRESERVED_LD_LIBRARY_PATH}"
+export LD_LIBRARY_PATH="${PIPER_LD_LIBRARY_PATH}"
 printf '%s\n' "How long does my report take?" | \
   "${PIPER_DIR}/piper" \
   --model "${PIPER_MODEL_DIR}/en_US-danny-low.onnx" \
@@ -227,6 +260,8 @@ for filename in sorted(glob.glob(str(result_dir / "level-*.json"))):
         return statistics.median(values) if values else 0.0
 
     response = [item["end_to_audio_seconds"] for item in clients if item.get("end_to_audio_seconds") is not None]
+    gpu_memory = level.get("max_gpu_memory_mib_by_device") or []
+    gpu_util = level.get("max_gpu_utilization_by_device") or []
     rows.append({
         "users": level["concurrency"],
         "success": f'{level["successes"]}/{level["concurrency"]}',
@@ -239,16 +274,22 @@ for filename in sorted(glob.glob(str(result_dir / "level-*.json"))):
         "p95": percentile(response, 95),
         "max": max(response) if response else 0.0,
         "vram": level.get("max_gpu_memory_mib") or 0,
+        "gpu0_vram": gpu_memory[0] if len(gpu_memory) > 0 and gpu_memory[0] is not None else 0,
+        "gpu1_vram": gpu_memory[1] if len(gpu_memory) > 1 and gpu_memory[1] is not None else 0,
+        "gpu0_util": gpu_util[0] if len(gpu_util) > 0 and gpu_util[0] is not None else 0,
+        "gpu1_util": gpu_util[1] if len(gpu_util) > 1 and gpu_util[1] is not None else 0,
     })
 
-header = "| Users | Success | Correct STT | Correct answers | STT s | LLM s | TTS s | Median s | P95 s | Max s | Peak VRAM MiB |"
-separator = "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
+header = "| Users | Success | Correct STT | Correct answers | STT s | LLM s | TTS s | Median s | P95 s | Max s | GPU0 MiB/% | GPU1 MiB/% |"
+separator = "|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|"
 lines = [header, separator]
 for row in rows:
     lines.append(
         f"| {row['users']} | {row['success']} | {row['correct_stt']} | {row['correct_answers']} | "
         f"{row['stt']:.3f} | {row['llm']:.3f} | {row['tts']:.3f} | "
-        f"{row['median']:.3f} | {row['p95']:.3f} | {row['max']:.3f} | {row['vram']:.0f} |"
+        f"{row['median']:.3f} | {row['p95']:.3f} | {row['max']:.3f} | "
+        f"{row['gpu0_vram']:.0f}/{row['gpu0_util']:.0f}% | "
+        f"{row['gpu1_vram']:.0f}/{row['gpu1_util']:.0f}% |"
     )
 
 report = "\n".join(lines) + "\n"

@@ -57,9 +57,9 @@ def wav_duration(data: bytes) -> float:
         return wav_file.getnframes() / float(wav_file.getframerate())
 
 
-def gpu_snapshot() -> tuple[float, float] | None:
+def gpu_snapshot() -> list[tuple[float, float]] | None:
     try:
-        output = subprocess.check_output(
+        lines = subprocess.check_output(
             [
                 "nvidia-smi",
                 "--query-gpu=utilization.gpu,memory.used",
@@ -68,14 +68,20 @@ def gpu_snapshot() -> tuple[float, float] | None:
             text=True,
             stderr=subprocess.DEVNULL,
             timeout=3,
-        ).strip().splitlines()[0]
-        util, memory = [float(part.strip()) for part in output.split(",")[:2]]
-        return util, memory
+        ).strip().splitlines()
+        snapshots = []
+        for line in lines:
+            util, memory = [float(part.strip()) for part in line.split(",")[:2]]
+            snapshots.append((util, memory))
+        return snapshots or None
     except Exception:
         return None
 
 
-async def sample_gpu(stop: asyncio.Event, samples: list[tuple[float, float]]) -> None:
+async def sample_gpu(
+    stop: asyncio.Event,
+    samples: list[list[tuple[float, float]]],
+) -> None:
     while not stop.is_set():
         snapshot = await asyncio.to_thread(gpu_snapshot)
         if snapshot is not None:
@@ -215,7 +221,7 @@ async def run_level(
 ) -> dict[str, object]:
     start_event = asyncio.Event()
     ready: list[int] = []
-    gpu_samples: list[tuple[float, float]] = []
+    gpu_samples: list[list[tuple[float, float]]] = []
     gpu_stop = asyncio.Event()
     gpu_task = asyncio.create_task(sample_gpu(gpu_stop, gpu_samples))
     tasks = [
@@ -260,8 +266,20 @@ async def run_level(
         "correct_answers": sum(result.answer_correct for result in successful),
         "median_end_to_audio_seconds": round(statistics.median(latencies), 3) if latencies else None,
         "max_end_to_audio_seconds": round(max(latencies), 3) if latencies else None,
-        "max_gpu_utilization_percent": max((sample[0] for sample in gpu_samples), default=None),
-        "max_gpu_memory_mib": max((sample[1] for sample in gpu_samples), default=None),
+        "max_gpu_utilization_percent": max(
+            (gpu[0] for sample in gpu_samples for gpu in sample), default=None
+        ),
+        "max_gpu_memory_mib": max(
+            (gpu[1] for sample in gpu_samples for gpu in sample), default=None
+        ),
+        "max_gpu_utilization_by_device": [
+            max((sample[index][0] for sample in gpu_samples if index < len(sample)), default=None)
+            for index in range(max((len(sample) for sample in gpu_samples), default=0))
+        ],
+        "max_gpu_memory_mib_by_device": [
+            max((sample[index][1] for sample in gpu_samples if index < len(sample)), default=None)
+            for index in range(max((len(sample) for sample in gpu_samples), default=0))
+        ],
         "clients": [asdict(result) for result in results],
     }
     print("LEVEL=" + json.dumps(summary, ensure_ascii=False), flush=True)
@@ -278,12 +296,14 @@ async def async_main(args: argparse.Namespace) -> int:
         "audio_seconds": len(pcm) / SAMPLE_RATE,
         "question": args.question,
         "voice_id": args.voice,
-        "baseline_gpu": {
-            "utilization_percent": baseline[0],
-            "memory_mib": baseline[1],
-        }
-        if baseline
-        else None,
+        "baseline_gpu": [
+            {
+                "device": index,
+                "utilization_percent": device[0],
+                "memory_mib": device[1],
+            }
+            for index, device in enumerate(baseline or [])
+        ],
         "levels": [],
     }
 
